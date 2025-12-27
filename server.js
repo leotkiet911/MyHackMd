@@ -3,8 +3,19 @@ const bodyParser = require('body-parser');
 const fs = require('fs');
 const path = require('path');
 const { exec } = require('child_process');
+const http = require('http');
+const { Server } = require('socket.io');
+const os = require('os');
 
 const app = express();
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"]
+  }
+});
+
 const PORT = 3000;
 
 // Handle paths for both development and pkg (executable)
@@ -87,6 +98,16 @@ function scanDirectory(dir, basePath = '') {
     }
     return a.name.localeCompare(b.name);
   });
+}
+
+// Helper function to broadcast file tree update
+function broadcastFileTreeUpdate() {
+  try {
+    const fileTree = scanDirectory(BIN_FOLDER);
+    io.emit('filetree:updated', { tree: fileTree, timestamp: Date.now() });
+  } catch (error) {
+    console.error('Error broadcasting file tree update:', error);
+  }
 }
 
 // API 1: GET /api/files - Return file tree structure
@@ -212,6 +233,15 @@ app.post('/api/move', (req, res) => {
 
     // Move the file/folder
     fs.renameSync(fullFromPath, fullToPath);
+    
+    // Broadcast move operation
+    broadcastFileTreeUpdate();
+    io.emit('file:moved', { 
+      fromPath: normalizedFrom, 
+      toPath: normalizedTo,
+      timestamp: Date.now()
+    });
+    
     res.json({ success: true, message: 'File/folder moved successfully' });
   } catch (error) {
     console.error('Error moving file/folder:', error);
@@ -354,6 +384,13 @@ app.delete('/api/delete', (req, res) => {
       fs.unlinkSync(fullPath);
     }
 
+    // Broadcast deletion
+    broadcastFileTreeUpdate();
+    io.emit('file:deleted', { 
+      path: normalizedPath,
+      timestamp: Date.now()
+    });
+
     res.json({ success: true, message: 'File/folder deleted successfully' });
   } catch (error) {
     console.error('Error deleting file/folder:', error);
@@ -423,6 +460,14 @@ app.post('/api/copy', (req, res) => {
       fs.copyFileSync(fullFromPath, fullToPath);
     }
 
+    // Broadcast copy operation
+    broadcastFileTreeUpdate();
+    io.emit('file:copied', { 
+      fromPath: normalizedFrom, 
+      toPath: normalizedTo,
+      timestamp: Date.now()
+    });
+
     res.json({ success: true, message: 'File/folder copied successfully' });
   } catch (error) {
     console.error('Error copying file/folder:', error);
@@ -470,6 +515,15 @@ app.post('/api/rename', (req, res) => {
 
     // Calculate relative path for response
     const relativeNewPath = path.relative(BIN_FOLDER, newPath).replace(/\\/g, '/');
+    
+    // Broadcast rename operation
+    broadcastFileTreeUpdate();
+    io.emit('file:renamed', { 
+      oldPath: normalizedPath, 
+      newPath: relativeNewPath,
+      timestamp: Date.now()
+    });
+    
     res.json({ success: true, message: 'File/folder renamed successfully', newPath: relativeNewPath });
   } catch (error) {
     console.error('Error renaming file/folder:', error);
@@ -537,18 +591,68 @@ function openBrowser(url) {
   });
 }
 
+// Get LAN IP address
+function getLANIP() {
+  const interfaces = os.networkInterfaces();
+  for (const name of Object.keys(interfaces)) {
+    for (const iface of interfaces[name]) {
+      // Skip internal (loopback) and non-IPv4 addresses
+      if (iface.family === 'IPv4' && !iface.internal) {
+        return iface.address;
+      }
+    }
+  }
+  return 'localhost';
+}
+
+// Socket.IO connection handling
+io.on('connection', (socket) => {
+  console.log(`📡 Client connected: ${socket.id}`);
+  
+  // Send current file tree to new client
+  socket.on('filetree:request', () => {
+    try {
+      const fileTree = scanDirectory(BIN_FOLDER);
+      socket.emit('filetree:updated', { tree: fileTree, timestamp: Date.now() });
+    } catch (error) {
+      console.error('Error sending file tree to client:', error);
+    }
+  });
+  
+  // Handle realtime file editing - broadcast to all other clients
+  socket.on('file:edit', (data) => {
+    // Broadcast to all other clients (excluding the sender)
+    socket.broadcast.emit('file:edit', {
+      path: data.path,
+      content: data.content,
+      timestamp: Date.now()
+    });
+  });
+  
+  socket.on('disconnect', () => {
+    console.log(`📡 Client disconnected: ${socket.id}`);
+  });
+});
+
 // Start server
-app.listen(PORT, () => {
-  const url = `http://localhost:${PORT}`;
+server.listen(PORT, '0.0.0.0', () => {
+  const localUrl = `http://localhost:${PORT}`;
+  const lanIP = getLANIP();
+  const lanUrl = `http://${lanIP}:${PORT}`;
+  
   console.log('='.repeat(60));
   console.log(`🚀 MyHackMD Server is running!`);
-  console.log(`📝 Web Interface: ${url}`);
+  console.log(`📝 Local Interface: ${localUrl}`);
+  console.log(`🌐 LAN Interface: ${lanUrl}`);
   console.log(`📁 Files stored in: ${BIN_FOLDER}`);
+  console.log(`📡 Realtime sync: Enabled (Socket.IO)`);
   console.log('='.repeat(60));
+  console.log(`\n💡 Other devices on your network can access:`);
+  console.log(`   ${lanUrl}\n`);
   
   // Open browser automatically
   setTimeout(() => {
-    openBrowser(url);
+    openBrowser(localUrl);
   }, 1000);
 });
 

@@ -6,6 +6,10 @@ let fileTreeData = [];
 let codeEditor = null;
 let selectedFolderPath = null; // Track selected folder for creating files
 let draggedElement = null; // Track dragged element for drag and drop
+let socket = null; // Socket.IO connection
+let isUpdatingFromSocket = false; // Flag to prevent circular updates
+let lastBroadcastedContent = ''; // Track last content sent to server
+let socketChangeTimeout = null; // Debounce for socket changes
 
 // Markdown-it container plugin (for ::: info, ::: success, etc.)
 function markdownItContainer(md, name) {
@@ -371,6 +375,8 @@ function updateFileNameDisplay(filePath) {
 
 // Load file content
 async function loadFile(filePath) {
+    // Reset broadcast content when loading new file
+    lastBroadcastedContent = '';
     try {
         // Update active state
         document.querySelectorAll('.file-item').forEach(el => {
@@ -392,7 +398,10 @@ async function loadFile(filePath) {
         
         // Update CodeMirror editor
         if (codeEditor) {
+            isUpdatingFromSocket = true;
             codeEditor.setValue(data.content);
+            lastBroadcastedContent = data.content;
+            isUpdatingFromSocket = false;
         }
         
         updatePreview(data.content);
@@ -716,8 +725,11 @@ async function saveFile() {
         
         updateSaveStatus('Saved', false);
         
-        // Refresh file tree in case of new files
-        fetchFileTree();
+        // File tree will be updated via Socket.IO if needed
+        // Only refresh if it's a new file
+        if (!fileTreeData.some(item => findItemByPath(fileTreeData, currentFilePath))) {
+            fetchFileTree();
+        }
     } catch (error) {
         console.error('Error saving file:', error);
         updateSaveStatus('Error saving', false);
@@ -1395,10 +1407,28 @@ function initCodeEditor() {
         // Auto-save on change with debounce
         const debouncedSave = debounce(saveFile, 1000);
         codeEditor.on('change', () => {
+            if (isUpdatingFromSocket) return; // Skip if updating from socket
+            
             const content = codeEditor.getValue();
             updatePreview(content);
+            
             if (currentFilePath) {
                 debouncedSave();
+                
+                // Broadcast changes to other clients via socket (realtime sync)
+                if (socket) {
+                    clearTimeout(socketChangeTimeout);
+                    socketChangeTimeout = setTimeout(() => {
+                        // Only broadcast if content actually changed
+                        if (content !== lastBroadcastedContent) {
+                            socket.emit('file:edit', {
+                                path: currentFilePath,
+                                content: content
+                            });
+                            lastBroadcastedContent = content;
+                        }
+                    }, 200); // Debounce 200ms for realtime sync
+                }
             }
         });
         
@@ -1858,10 +1888,128 @@ async function moveFileOrFolder(fromPath, toPath) {
     }
 }
 
+// Initialize Socket.IO connection
+function initSocket() {
+    if (typeof io === 'undefined') {
+        console.warn('Socket.IO not loaded');
+        return;
+    }
+    
+    socket = io();
+    
+    socket.on('connect', () => {
+        console.log('📡 Connected to server');
+        // Request current file tree
+        socket.emit('filetree:request');
+    });
+    
+    socket.on('disconnect', () => {
+        console.log('📡 Disconnected from server');
+    });
+    
+    // Listen for file tree updates
+    socket.on('filetree:updated', (data) => {
+        if (!isUpdatingFromSocket) {
+            fileTreeData = data.tree;
+            renderFileTree(fileTreeData);
+            console.log('📁 File tree updated from server');
+        }
+    });
+    
+    // Listen for file content changes (from save)
+    socket.on('file:changed', (data) => {
+        // Only update if this file is currently open and change is from another client
+        if (currentFilePath === data.path && !isUpdatingFromSocket) {
+            if (codeEditor && codeEditor.getValue() !== data.content) {
+                // Update editor content
+                const cursor = codeEditor.getCursor();
+                const scrollInfo = codeEditor.getScrollInfo();
+                isUpdatingFromSocket = true;
+                codeEditor.setValue(data.content);
+                codeEditor.setCursor(cursor);
+                codeEditor.scrollTo(null, scrollInfo.top);
+                updatePreview(data.content);
+                lastBroadcastedContent = data.content;
+                isUpdatingFromSocket = false;
+                console.log('📝 File updated from server:', data.path);
+            }
+        }
+    });
+    
+    // Listen for realtime file editing (from other clients typing)
+    socket.on('file:edit', (data) => {
+        // Only update if this file is currently open and change is from another client
+        if (currentFilePath === data.path && !isUpdatingFromSocket) {
+            if (codeEditor) {
+                const currentContent = codeEditor.getValue();
+                // Only update if content is different (avoid unnecessary updates)
+                if (currentContent !== data.content) {
+                    // Preserve cursor position and scroll
+                    const cursor = codeEditor.getCursor();
+                    const scrollInfo = codeEditor.getScrollInfo();
+                    
+                    isUpdatingFromSocket = true;
+                    codeEditor.setValue(data.content);
+                    // Try to restore cursor position if possible
+                    const newLineCount = codeEditor.lineCount();
+                    if (cursor.line < newLineCount) {
+                        codeEditor.setCursor(cursor);
+                    } else {
+                        // If line doesn't exist anymore, go to end
+                        codeEditor.setCursor(newLineCount - 1, 0);
+                    }
+                    codeEditor.scrollTo(null, scrollInfo.top);
+                    updatePreview(data.content);
+                    lastBroadcastedContent = data.content;
+                    isUpdatingFromSocket = false;
+                    console.log('✏️ Realtime update from another client:', data.path);
+                }
+            }
+        }
+    });
+    
+    // Listen for file deletion
+    socket.on('file:deleted', (data) => {
+        if (currentFilePath === data.path) {
+            // Current file was deleted, clear editor
+            currentFilePath = null;
+            if (codeEditor) {
+                codeEditor.setValue('');
+            }
+            updatePreview('');
+            updateFileNameDisplay('');
+        }
+        // Refresh file tree
+        fetchFileTree();
+    });
+    
+    // Listen for file moves/renames
+    socket.on('file:moved', (data) => {
+        if (currentFilePath === data.fromPath) {
+            currentFilePath = data.toPath;
+            loadFile(data.toPath);
+        }
+        fetchFileTree();
+    });
+    
+    socket.on('file:renamed', (data) => {
+        if (currentFilePath === data.oldPath) {
+            currentFilePath = data.newPath;
+            loadFile(data.newPath);
+        }
+        fetchFileTree();
+    });
+    
+    socket.on('file:copied', (data) => {
+        fetchFileTree();
+    });
+}
+
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', () => {
     initMarkdown();
     initCodeEditor();
+    initSocket(); // Initialize Socket.IO
     fetchFileTree();
 
     const newFileBtn = document.getElementById('newFileBtn');
