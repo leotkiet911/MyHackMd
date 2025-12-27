@@ -535,6 +535,21 @@ function preprocessMathBrackets(content) {
     // Process both inline $...$ and block $$...$$ math
     // Auto-add \left and \right to brackets that contain fractions
     
+    // Helper to find matching closing bracket
+    const findMatchingBracket = (str, startPos, openChar, closeChar) => {
+        let depth = 1;
+        let pos = startPos + 1;
+        while (pos < str.length && depth > 0) {
+            if (str[pos] === openChar && (pos === 0 || str[pos - 1] !== '\\')) {
+                depth++;
+            } else if (str[pos] === closeChar && (pos === 0 || str[pos - 1] !== '\\')) {
+                depth--;
+            }
+            pos++;
+        }
+        return depth === 0 ? pos - 1 : -1;
+    };
+    
     // Helper to process a single math expression
     const processMath = (math) => {
         // Check if this expression contains fractions
@@ -543,50 +558,66 @@ function preprocessMathBrackets(content) {
         }
         
         let result = math;
+        const bracketPairs = [
+            { open: '(', close: ')', left: '\\left(', right: '\\right)' },
+            { open: '[', close: ']', left: '\\left[', right: '\\right]' }
+        ];
         
-        // Pattern 1: Simple case - ( \frac{a}{b} ) -> \left( \frac{a}{b} \right)
-        // Handle parentheses
-        result = result.replace(
-            /([^\\]|^)\(([^()]*?(\\frac|\\dfrac)\s*\{[^}]*\}\s*\{[^}]*\}[^()]*?)\)([^\\]|$)/g,
-            (match, before, inner, frac, after) => {
-                // Skip if already has \left or \right
-                if (before.includes('\\left') || after.includes('\\right')) {
-                    return match;
+        // Process each bracket type
+        for (const bp of bracketPairs) {
+            let pos = 0;
+            while (pos < result.length) {
+                // Find opening bracket (not escaped and not already part of \left)
+                const openPos = result.indexOf(bp.open, pos);
+                if (openPos === -1) break;
+                
+                // Check if it's escaped
+                if (openPos > 0 && result[openPos - 1] === '\\') {
+                    pos = openPos + 1;
+                    continue;
                 }
-                return before + '\\left(' + inner + '\\right)' + after;
+                
+                // Check if it's already part of \left(...)
+                const beforeBracket = result.substring(Math.max(0, openPos - 6), openPos);
+                if (beforeBracket.endsWith('\\left')) {
+                    // Already has \left, skip this bracket pair
+                    // Find matching closing bracket and skip it
+                    const closePos = findMatchingBracket(result, openPos, bp.open, bp.close);
+                    pos = closePos > 0 ? closePos + 1 : openPos + 1;
+                    continue;
+                }
+                
+                // Find matching closing bracket
+                const closePos = findMatchingBracket(result, openPos, bp.open, bp.close);
+                if (closePos === -1) {
+                    pos = openPos + 1;
+                    continue;
+                }
+                
+                // Check if closing bracket is already part of \right)
+                const afterBracket = result.substring(closePos + 1, Math.min(result.length, closePos + 7));
+                if (afterBracket.startsWith('\\right')) {
+                    // Already has \right, skip
+                    pos = closePos + 1;
+                    continue;
+                }
+                
+                // Extract content between brackets
+                const inner = result.substring(openPos + 1, closePos);
+                
+                // Check if inner content contains a fraction
+                if (/(\\frac|\\dfrac)/.test(inner)) {
+                    // Replace with \left and \right
+                    result = result.substring(0, openPos) + 
+                            bp.left + inner + bp.right + 
+                            result.substring(closePos + 1);
+                    // Continue from after the replacement
+                    pos = openPos + bp.left.length + inner.length + bp.right.length;
+                } else {
+                    pos = closePos + 1;
+                }
             }
-        );
-        
-        // Pattern 2: Square brackets [ \frac{a}{b} ] -> \left[ \frac{a}{b} \right]
-        result = result.replace(
-            /([^\\]|^)\[([^\[\]]*?(\\frac|\\dfrac)\s*\{[^}]*\}\s*\{[^}]*\}[^\[\]]*?)\]([^\\]|$)/g,
-            (match, before, inner, frac, after) => {
-                if (before.includes('\\left') || after.includes('\\right')) {
-                    return match;
-                }
-                return before + '\\left[' + inner + '\\right]' + after;
-            }
-        );
-        
-        // Pattern 3: Curly braces { \frac{a}{b} } -> \left\{ \frac{a}{b} \right\}
-        // But be careful - LaTeX uses { } for grouping, so only handle specific cases
-        result = result.replace(
-            /([^\\]|^)\{([^{}]*?(\\frac|\\dfrac)\s*\{[^}]*\}\s*\{[^}]*\}[^{}]*?)\}([^\\]|$)/g,
-            (match, before, inner, frac, after) => {
-                // Only convert if it looks like a bracket pair (not LaTeX grouping)
-                // This is a heuristic - if inner has balanced braces, it's likely grouping
-                const openBraces = (inner.match(/\{/g) || []).length;
-                const closeBraces = (inner.match(/\}/g) || []).length;
-                if (openBraces === closeBraces && openBraces > 0) {
-                    // Likely LaTeX grouping, skip
-                    return match;
-                }
-                if (before.includes('\\left') || after.includes('\\right')) {
-                    return match;
-                }
-                return before + '\\left\\{' + inner + '\\right\\}' + after;
-            }
-        );
+        }
         
         return result;
     };
