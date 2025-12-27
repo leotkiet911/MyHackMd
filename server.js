@@ -2,11 +2,49 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const fs = require('fs');
 const path = require('path');
+const { exec } = require('child_process');
 
 const app = express();
 const PORT = 3000;
-const BIN_FOLDER = path.join(__dirname, 'bin');
-const PUBLIC_FOLDER = path.join(__dirname, 'public');
+
+// Handle paths for both development and pkg (executable)
+// When running as .exe, __dirname points to a temp folder, so we use process.execPath
+const isPkg = typeof process.pkg !== 'undefined';
+const baseDir = isPkg ? path.dirname(process.execPath) : __dirname;
+const BIN_FOLDER = path.join(baseDir, 'bin');
+let PUBLIC_FOLDER = isPkg ? path.join(baseDir, 'public') : path.join(__dirname, 'public');
+
+// If running as .exe and public folder doesn't exist, extract from bundled assets
+if (isPkg && !fs.existsSync(PUBLIC_FOLDER)) {
+  // Try to access bundled public folder from pkg
+  // pkg extracts assets to a temp folder accessible via __dirname
+  const bundledPublic = path.join(__dirname, 'public');
+  if (fs.existsSync(bundledPublic)) {
+    // Copy public folder from bundled location to baseDir
+    PUBLIC_FOLDER = path.join(baseDir, 'public');
+    if (!fs.existsSync(PUBLIC_FOLDER)) {
+      fs.mkdirSync(PUBLIC_FOLDER, { recursive: true });
+      copyDirSync(bundledPublic, PUBLIC_FOLDER);
+    }
+  }
+}
+
+// Helper function to copy directory
+function copyDirSync(src, dest) {
+  if (!fs.existsSync(dest)) {
+    fs.mkdirSync(dest, { recursive: true });
+  }
+  const entries = fs.readdirSync(src, { withFileTypes: true });
+  for (const entry of entries) {
+    const srcPath = path.join(src, entry.name);
+    const destPath = path.join(dest, entry.name);
+    if (entry.isDirectory()) {
+      copyDirSync(srcPath, destPath);
+    } else {
+      fs.copyFileSync(srcPath, destPath);
+    }
+  }
+}
 
 // Middleware
 app.use(bodyParser.json({ limit: '50mb' }));
@@ -479,9 +517,38 @@ app.post('/api/save', (req, res) => {
   }
 });
 
+// Function to open browser
+function openBrowser(url) {
+  const platform = process.platform;
+  let command;
+  
+  if (platform === 'win32') {
+    command = `start "" "${url}"`;
+  } else if (platform === 'darwin') {
+    command = `open "${url}"`;
+  } else {
+    command = `xdg-open "${url}"`;
+  }
+  
+  exec(command, (error) => {
+    if (error) {
+      console.log(`Could not open browser automatically. Please open: ${url}`);
+    }
+  });
+}
+
 // Start server
 app.listen(PORT, () => {
-  console.log(`HackMD clone server running on http://localhost:${PORT}`);
-  console.log(`Files are stored in: ${BIN_FOLDER}`);
+  const url = `http://localhost:${PORT}`;
+  console.log('='.repeat(60));
+  console.log(`🚀 MyHackMD Server is running!`);
+  console.log(`📝 Web Interface: ${url}`);
+  console.log(`📁 Files stored in: ${BIN_FOLDER}`);
+  console.log('='.repeat(60));
+  
+  // Open browser automatically
+  setTimeout(() => {
+    openBrowser(url);
+  }, 1000);
 });
 

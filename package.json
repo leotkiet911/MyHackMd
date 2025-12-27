@@ -3,15 +3,32 @@
   "version": "1.0.0",
   "description": "A simple local HackMD clone",
   "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
+  "bin": {
+    "MyHackMd": "./server.js"
   },
-  "keywords": ["markdown", "editor", "hackmd"],
+  "scripts": {
+    "start": "node server.js",
+    "build": "node build.js",
+    "build:exe": "pkg . --targets node18-win-x64 --output MyHackMd.exe"
+  },
+  "keywords": [
+    "markdown",
+    "editor",
+    "hackmd"
+  ],
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "express": "^4.18.2",
-    "body-parser": "^1.20.2"
+    "body-parser": "^1.20.2",
+    "express": "^4.18.2"
+  },
+  "devDependencies": {
+    "pkg": "^5.8.1"
+  },
+  "pkg": {
+    "assets": [
+      "public/**/*"
+    ],
+    "outputPath": "."
   }
 }
-

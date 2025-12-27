@@ -62,8 +62,3 @@ MyHackMD/
 - **Frontend**: Vanilla JavaScript (ES6+), HTML5, CSS3
 - **Backend**: Node.js with Express
 - **Markdown**: markdown-it (via CDN)
-
-## License
-
-MIT
-
