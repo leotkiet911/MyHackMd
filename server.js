@@ -21,7 +21,13 @@ const PORT = 3000;
 // Handle paths for both development and pkg (executable)
 // When running as .exe, __dirname points to a temp folder, so we use process.execPath
 const isPkg = typeof process.pkg !== 'undefined';
-const baseDir = isPkg ? path.dirname(process.execPath) : __dirname;
+let baseDir = isPkg ? path.dirname(process.execPath) : __dirname;
+
+// If .exe is in public folder, use parent directory as baseDir (root directory)
+if (isPkg && baseDir.endsWith('public')) {
+  baseDir = path.dirname(baseDir);
+}
+
 const BIN_FOLDER = path.join(baseDir, 'bin');
 let PUBLIC_FOLDER = isPkg ? path.join(baseDir, 'public') : path.join(__dirname, 'public');
 
