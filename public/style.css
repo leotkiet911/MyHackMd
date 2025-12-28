@@ -250,6 +250,16 @@ body {
     flex-direction: column;
     border-right: 1px solid #3e3e42;
     overflow: hidden;
+    transition: flex 0.3s ease;
+}
+
+.editor-container.view-mode .editor-panel {
+    display: none;
+}
+
+.editor-container.view-mode .preview-panel {
+    flex: 1;
+    border-right: none;
 }
 
 .preview-panel {
@@ -268,6 +278,49 @@ body {
     font-weight: 500;
     color: #cccccc;
     gap: 10px;
+}
+
+.panel-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
+.mode-toggle-btn,
+.export-btn {
+    background-color: #37373d;
+    color: #cccccc;
+    border: 1px solid #3e3e42;
+    padding: 4px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 11px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
+    white-space: nowrap;
+}
+
+.mode-toggle-btn:hover,
+.export-btn:hover {
+    background-color: #464647;
+    border-color: #4e4e4e;
+    color: #ffffff;
+}
+
+.mode-toggle-btn.active {
+    background-color: #0e639c;
+    border-color: #1177bb;
+    color: #ffffff;
+}
+
+.action-separator {
+    width: 1px;
+    height: 16px;
+    background-color: #3e3e42;
+    margin: 0 2px;
 }
 
 .panel-title {
@@ -290,6 +343,29 @@ body {
     background-color: #f3f3f3;
     color: #333333;
     border-bottom: 1px solid #e0e0e0;
+}
+
+.preview-panel .mode-toggle-btn,
+.preview-panel .export-btn {
+    background-color: #ffffff;
+    color: #333333;
+    border: 1px solid #d0d0d0;
+}
+
+.preview-panel .mode-toggle-btn:hover,
+.preview-panel .export-btn:hover {
+    background-color: #f0f0f0;
+    border-color: #b0b0b0;
+}
+
+.preview-panel .mode-toggle-btn.active {
+    background-color: #0e639c;
+    border-color: #1177bb;
+    color: #ffffff;
+}
+
+.preview-panel .action-separator {
+    background-color: #d0d0d0;
 }
 
 .save-status {

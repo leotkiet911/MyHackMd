@@ -2005,6 +2005,159 @@ function initSocket() {
     });
 }
 
+// View/Edit Mode Toggle
+let isViewMode = false;
+
+function toggleViewMode() {
+    isViewMode = true;
+    const editorContainer = document.querySelector('.editor-container');
+    const viewModeBtn = document.getElementById('viewModeBtn');
+    const editModeBtn = document.getElementById('editModeBtn');
+    
+    editorContainer.classList.add('view-mode');
+    viewModeBtn.classList.add('active');
+    editModeBtn.classList.remove('active');
+}
+
+function toggleEditMode() {
+    isViewMode = false;
+    const editorContainer = document.querySelector('.editor-container');
+    const viewModeBtn = document.getElementById('viewModeBtn');
+    const editModeBtn = document.getElementById('editModeBtn');
+    
+    editorContainer.classList.remove('view-mode');
+    viewModeBtn.classList.remove('active');
+    editModeBtn.classList.add('active');
+}
+
+// Export functions
+async function exportAsPDF() {
+    if (!currentFilePath) {
+        alert('Please open a file first');
+        return;
+    }
+    
+    try {
+        const content = codeEditor ? codeEditor.getValue() : '';
+        if (!content) {
+            alert('File is empty');
+            return;
+        }
+        
+        // Get rendered HTML (same as preview)
+        let processedContent = preprocessMathBrackets(content);
+        processedContent = preprocessContainers(processedContent);
+        const html = md.render(processedContent);
+        
+        // Get preview element's HTML which already has math rendered
+        const previewEl = document.getElementById('preview');
+        const previewHTML = previewEl.innerHTML;
+        
+        // Create a new window for printing
+        const printWindow = window.open('', '_blank');
+        const fileName = escapeHtml(currentFilePath.split('/').pop() || 'document');
+        
+        printWindow.document.write(`
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>${fileName}</title>
+                <meta charset="UTF-8">
+                <style>
+                    body {
+                        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+                        max-width: 800px;
+                        margin: 0 auto;
+                        padding: 20px;
+                        line-height: 1.6;
+                        color: #333;
+                    }
+                    h1, h2, h3, h4, h5, h6 {
+                        margin-top: 24px;
+                        margin-bottom: 16px;
+                        font-weight: 600;
+                        line-height: 1.25;
+                    }
+                    h1 { font-size: 2em; border-bottom: 1px solid #eaecef; padding-bottom: 0.3em; }
+                    h2 { font-size: 1.5em; border-bottom: 1px solid #eaecef; padding-bottom: 0.3em; }
+                    p { margin-bottom: 16px; }
+                    ul, ol { margin-bottom: 16px; padding-left: 2em; }
+                    code { background-color: rgba(27, 31, 35, 0.05); border-radius: 3px; padding: 0.2em 0.4em; font-size: 85%; }
+                    pre { background-color: #f6f8fa; border-radius: 6px; padding: 16px; margin-bottom: 16px; overflow: auto; }
+                    pre code { background-color: transparent; padding: 0; }
+                    blockquote { border-left: 4px solid #dfe2e5; color: #6a737d; padding: 0 1em; margin: 0 0 16px 0; }
+                    table { border-collapse: collapse; margin-bottom: 16px; width: 100%; }
+                    table th, table td { border: 1px solid #dfe2e5; padding: 6px 13px; }
+                    table th { background-color: #f6f8fa; font-weight: 600; }
+                    img { max-width: 100%; height: auto; }
+                    .markdown-container { margin: 16px 0; padding: 16px; border-left: 4px solid #ccc; border-radius: 4px; background-color: #f6f8fa; }
+                    .markdown-container-info { border-left-color: #2196F3; background-color: #e3f2fd; }
+                    .markdown-container-success { border-left-color: #4caf50; background-color: #e8f5e9; }
+                    .markdown-container-warning { border-left-color: #ff9800; background-color: #fff3e0; }
+                    .markdown-container-danger { border-left-color: #f44336; background-color: #ffebee; }
+                    .markdown-container-note { border-left-color: #9c27b0; background-color: #f3e5f5; }
+                    .markdown-container-tip { border-left-color: #00bcd4; background-color: #e0f7fa; }
+                    .katex { font-size: 1.1em; }
+                    .katex-display { overflow-x: auto; overflow-y: hidden; padding: 1em 0; margin: 1em 0; }
+                    @media print {
+                        body { padding: 0; }
+                        @page { margin: 1cm; }
+                    }
+                </style>
+                <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+            </head>
+            <body>
+                ${previewHTML}
+                <script>
+                    // Trigger print dialog after page loads
+                    window.onload = function() {
+                        setTimeout(() => {
+                            window.print();
+                        }, 500);
+                    };
+                </script>
+            </body>
+            </html>
+        `);
+        printWindow.document.close();
+    } catch (error) {
+        console.error('Error exporting PDF:', error);
+        alert('Failed to export PDF: ' + error.message);
+    }
+}
+
+async function exportAsMD() {
+    if (!currentFilePath) {
+        alert('Please open a file first');
+        return;
+    }
+    
+    try {
+        const content = codeEditor ? codeEditor.getValue() : '';
+        if (!content) {
+            alert('File is empty');
+            return;
+        }
+        
+        // Get filename
+        const fileName = currentFilePath.split('/').pop() || 'export.md';
+        
+        // Create blob and download
+        const blob = new Blob([content], { type: 'text/markdown' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = fileName;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    } catch (error) {
+        console.error('Error exporting MD:', error);
+        alert('Failed to export Markdown: ' + error.message);
+    }
+}
+
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', () => {
     initMarkdown();
@@ -2014,12 +2167,24 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const newFileBtn = document.getElementById('newFileBtn');
     const newFolderBtn = document.getElementById('newFolderBtn');
+    const viewModeBtn = document.getElementById('viewModeBtn');
+    const editModeBtn = document.getElementById('editModeBtn');
+    const exportPdfBtn = document.getElementById('exportPdfBtn');
+    const exportMdBtn = document.getElementById('exportMdBtn');
 
     // New file button
     newFileBtn.addEventListener('click', createNewFile);
 
     // New folder button
     newFolderBtn.addEventListener('click', createNewFolder);
+    
+    // View/Edit mode toggle
+    viewModeBtn.addEventListener('click', toggleViewMode);
+    editModeBtn.addEventListener('click', toggleEditMode);
+    
+    // Export buttons
+    exportPdfBtn.addEventListener('click', exportAsPDF);
+    exportMdBtn.addEventListener('click', exportAsMD);
 
     // Initial preview message
     updatePreview('');

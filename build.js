@@ -22,8 +22,28 @@ try {
   if (!fs.existsSync(publicDir)) {
     fs.mkdirSync(publicDir, { recursive: true });
   }
-  execSync('npx pkg . --targets node18-win-x64 --output public/MyHackMd.exe', { stdio: 'inherit' });
-  console.log('\n✅ Build successful! MyHackMd.exe created in public folder');
+  
+  // Delete old .exe file in public if exists (pkg doesn't allow building into existing executable)
+  const oldExePath = path.join(publicDir, 'MyHackMd.exe');
+  if (fs.existsSync(oldExePath)) {
+    console.log('🗑️  Removing old .exe file...');
+    fs.unlinkSync(oldExePath);
+  }
+  
+  // Build to a temporary location first, then move to public
+  const tempExePath = path.join(process.cwd(), 'MyHackMd-temp.exe');
+  const finalExePath = path.join(publicDir, 'MyHackMd.exe');
+  
+  // Build to temp location
+  execSync(`npx pkg . --targets node18-win-x64 --output "${tempExePath}"`, { stdio: 'inherit' });
+  
+  // Move to public folder
+  if (fs.existsSync(tempExePath)) {
+    fs.renameSync(tempExePath, finalExePath);
+    console.log('\n✅ Build successful! MyHackMd.exe created in public folder');
+  } else {
+    throw new Error('Build file not found after build');
+  }
 } catch (error) {
   console.error('❌ Build failed:', error.message);
   process.exit(1);
