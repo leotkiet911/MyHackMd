@@ -429,6 +429,7 @@ body {
 .preview-content {
     flex: 1;
     padding: 20px;
+    padding-bottom: 300px; /* Thêm padding dưới cùng để khớp với khoảng trống trong Editor */
     overflow-y: auto;
     color: #333333;
     line-height: 1.6;

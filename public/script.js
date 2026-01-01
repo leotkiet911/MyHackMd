@@ -10,6 +10,10 @@ let socket = null; // Socket.IO connection
 let isUpdatingFromSocket = false; // Flag to prevent circular updates
 let lastBroadcastedContent = ''; // Track last content sent to server
 let socketChangeTimeout = null; // Debounce for socket changes
+let isTyping = false; // Flag to check if user is typing (prevents scroll sync jank)
+let typingTimeout = null; // Timeout to reset typing flag
+let elementPositionsCache = null; // Cache for preview element positions (for scroll sync)
+let cacheTimestamp = 0; // Timestamp for cache validation
 
 // Markdown-it container plugin (for ::: info, ::: success, etc.)
 function markdownItContainer(md, name) {
@@ -692,7 +696,43 @@ function updatePreview(content) {
         // Render markdown (texmath plugin will handle math automatically)
         let html = md.render(processedContent);
         
+        // --- FIX START: Logic Ghim đáy (Pin to Bottom) ---
+        // 1. Kiểm tra xem user có đang đứng sát đáy Preview không (sai số 50px)
+        const wasAtBottom = previewEl.scrollHeight - previewEl.scrollTop <= previewEl.clientHeight + 50;
+        
         previewEl.innerHTML = html;
+        
+        // 2. Nếu trước đó đang ở đáy, thì sau khi render ép lại xuống đáy ngay lập tức
+        if (wasAtBottom) {
+            previewEl.scrollTop = previewEl.scrollHeight;
+        }
+        // --- FIX END ---
+        
+        // --- FIX: Xử lý ảnh để fix cache vị trí và tránh Layout Shift ---
+        const images = previewEl.querySelectorAll('img');
+        images.forEach(img => {
+            // Khi ảnh load xong, invalidate cache để tính toán lại vị trí chính xác
+            img.addEventListener('load', () => {
+                if (!isTyping) {
+                    elementPositionsCache = null; 
+                }
+                
+                // --- FIX BỔ SUNG: Khi ảnh load xong, nếu đang chế độ ghim đáy thì ghim tiếp ---
+                // Vì ảnh load xong làm trang dài ra, cần cuộn tiếp xuống
+                if (wasAtBottom) {
+                    previewEl.scrollTop = previewEl.scrollHeight;
+                }
+            });
+            
+            // Xử lý lỗi load ảnh
+            img.addEventListener('error', () => {
+                // Nếu ảnh lỗi, vẫn invalidate cache để tránh tính toán sai
+                if (!isTyping) {
+                    elementPositionsCache = null;
+                }
+            });
+        });
+        // --- FIX END ---
     } else {
         previewEl.innerHTML = '<p style="color: #999;">Preview will appear here...</p>';
     }
@@ -1409,6 +1449,16 @@ function initCodeEditor() {
         codeEditor.on('change', () => {
             if (isUpdatingFromSocket) return; // Skip if updating from socket
             
+            // --- FIX: Đánh dấu đang gõ để chặn scroll sync ---
+            isTyping = true;
+            if (typingTimeout) clearTimeout(typingTimeout);
+            
+            // Sau 500ms không gõ gì nữa thì mới cho phép sync lại
+            typingTimeout = setTimeout(() => {
+                isTyping = false;
+            }, 500);
+            // --- FIX END ---
+            
             const content = codeEditor.getValue();
             updatePreview(content);
             
@@ -1432,23 +1482,213 @@ function initCodeEditor() {
             }
         });
         
-        // Sync scroll between editor and preview
+        // Sync scroll between editor and preview (pixel-based, accounting for images)
         let isScrollingEditor = false;
         let isScrollingPreview = false;
         
         const previewEl = document.getElementById('preview');
         
-        // Sync scroll from editor to preview
+        // Cache for element positions is now global (declared at top of file)
+        
+        // Function to rebuild element positions cache
+        function rebuildElementPositionsCache() {
+            const elements = previewEl.querySelectorAll('p, h1, h2, h3, h4, h5, h6, img, pre, blockquote, ul, ol, table, .markdown-container, .katex-display');
+            elementPositionsCache = [];
+            
+            elements.forEach((element, index) => {
+                const rect = element.getBoundingClientRect();
+                const previewRect = previewEl.getBoundingClientRect();
+                const offsetTop = element.offsetTop || (rect.top - previewRect.top + previewEl.scrollTop);
+                const height = element.offsetHeight || rect.height;
+                
+                elementPositionsCache.push({
+                    element: element,
+                    offsetTop: offsetTop,
+                    height: height,
+                    offsetBottom: offsetTop + height,
+                    isImage: element.tagName === 'IMG'
+                });
+            });
+            
+            cacheTimestamp = Date.now();
+        }
+        
+        // Function to get preview scroll position for editor line (pixel-based)
+        function getPreviewScrollForEditorLine(lineNumber) {
+            // Rebuild cache if needed (every 500ms or if empty)
+            if (!elementPositionsCache || Date.now() - cacheTimestamp > 500) {
+                rebuildElementPositionsCache();
+            }
+            
+            if (!elementPositionsCache || elementPositionsCache.length === 0) {
+                // Fallback to ratio-based
+                const scrollInfo = codeEditor.getScrollInfo();
+                const maxScroll = scrollInfo.height - scrollInfo.clientHeight;
+                const scrollRatio = maxScroll > 0 ? scrollInfo.top / maxScroll : 0;
+                const previewMaxScroll = previewEl.scrollHeight - previewEl.clientHeight;
+                return previewMaxScroll > 0 ? scrollRatio * previewMaxScroll : 0;
+            }
+            
+            // Get editor content to match with preview elements
+            const editorContent = codeEditor.getValue();
+            const lines = editorContent.split('\n');
+            
+            if (lineNumber < 0 || lineNumber >= lines.length) {
+                lineNumber = Math.max(0, Math.min(lines.length - 1, lineNumber));
+            }
+            
+            const lineText = lines[lineNumber] || '';
+            
+            // Try to find matching element in preview
+            let bestMatch = null;
+            let bestScore = 0;
+            
+            elementPositionsCache.forEach((cacheItem, index) => {
+                const element = cacheItem.element;
+                const elementText = element.textContent || '';
+                let score = 0;
+                
+                // For images, check if line contains image markdown
+                if (cacheItem.isImage) {
+                    if (lineText.match(/!\[.*\]\(.*\)/)) {
+                        score = 100; // High score for image match
+                    }
+                } else {
+                    // For text elements, check if line text appears in element
+                    if (lineText.trim().length > 0) {
+                        const trimmedLine = lineText.trim();
+                        if (elementText.includes(trimmedLine)) {
+                            score = 50;
+                        } else if (elementText.includes(trimmedLine.substring(0, Math.min(20, trimmedLine.length)))) {
+                            score = 25;
+                        }
+                    }
+                }
+                
+                // Bonus for elements near the estimated position
+                const estimatedLineRatio = lineNumber / Math.max(1, lines.length - 1);
+                const estimatedPixelPos = estimatedLineRatio * previewEl.scrollHeight;
+                const distance = Math.abs(cacheItem.offsetTop - estimatedPixelPos);
+                const distanceScore = Math.max(0, 30 - distance / 10);
+                score += distanceScore;
+                
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestMatch = cacheItem;
+                }
+            });
+            
+            if (bestMatch) {
+                // Use the element's top position, adjusted for better alignment
+                return Math.max(0, bestMatch.offsetTop - 10);
+            }
+            
+            // Fallback: estimate based on line ratio
+            const lineRatio = lineNumber / Math.max(1, lines.length - 1);
+            return lineRatio * (previewEl.scrollHeight - previewEl.clientHeight);
+        }
+        
+        // Function to get editor line for preview scroll position
+        function getEditorLineForPreviewScroll(scrollTop) {
+            // Rebuild cache if needed
+            if (!elementPositionsCache || Date.now() - cacheTimestamp > 500) {
+                rebuildElementPositionsCache();
+            }
+            
+            if (!elementPositionsCache || elementPositionsCache.length === 0) {
+                // Fallback to ratio-based
+                const previewMaxScroll = previewEl.scrollHeight - previewEl.clientHeight;
+                const scrollRatio = previewMaxScroll > 0 ? scrollTop / previewMaxScroll : 0;
+                const scrollInfo = codeEditor.getScrollInfo();
+                const maxScroll = scrollInfo.height - scrollInfo.clientHeight;
+                return maxScroll > 0 ? scrollRatio * maxScroll : 0;
+            }
+            
+            // Find element at scroll position
+            let bestMatch = null;
+            let bestDistance = Infinity;
+            
+            elementPositionsCache.forEach(cacheItem => {
+                const elementTop = cacheItem.offsetTop;
+                const elementBottom = cacheItem.offsetBottom;
+                
+                // Check if scroll position is within or near this element
+                if (scrollTop >= elementTop && scrollTop <= elementBottom) {
+                    const distance = Math.abs(scrollTop - elementTop);
+                    if (distance < bestDistance) {
+                        bestDistance = distance;
+                        bestMatch = cacheItem;
+                    }
+                } else if (scrollTop < elementTop && elementTop - scrollTop < bestDistance) {
+                    bestDistance = elementTop - scrollTop;
+                    bestMatch = cacheItem;
+                }
+            });
+            
+            if (bestMatch) {
+                // Try to find corresponding line in editor
+                const element = bestMatch.element;
+                const editorContent = codeEditor.getValue();
+                const lines = editorContent.split('\n');
+                
+                // For images, look for image markdown
+                if (bestMatch.isImage) {
+                    for (let i = 0; i < lines.length; i++) {
+                        if (lines[i].match(/!\[.*\]\(.*\)/)) {
+                            return i;
+                        }
+                    }
+                }
+                
+                // For text elements, try to match content
+                const elementText = element.textContent || '';
+                if (elementText.trim().length > 0) {
+                    const searchText = elementText.trim().substring(0, 50);
+                    for (let i = 0; i < lines.length; i++) {
+                        if (lines[i].includes(searchText) || searchText.includes(lines[i].trim())) {
+                            return i;
+                        }
+                    }
+                }
+                
+                // Estimate based on element position
+                const elementIndex = elementPositionsCache.indexOf(bestMatch);
+                const elementRatio = elementIndex / Math.max(1, elementPositionsCache.length - 1);
+                return Math.floor(elementRatio * (lines.length - 1));
+            }
+            
+            // Fallback: use ratio
+            const previewMaxScroll = previewEl.scrollHeight - previewEl.clientHeight;
+            const scrollRatio = previewMaxScroll > 0 ? scrollTop / previewMaxScroll : 0;
+            const lines = codeEditor.getValue().split('\n');
+            return Math.floor(scrollRatio * (lines.length - 1));
+        }
+        
+        // Sync scroll from editor to preview (pixel-based)
         codeEditor.on('scroll', function() {
             if (isScrollingPreview) return;
+            if (isTyping) return; // <--- FIX: Đang gõ thì không sync
+            
             isScrollingEditor = true;
             
             const scrollInfo = codeEditor.getScrollInfo();
-            const maxScroll = scrollInfo.height - scrollInfo.clientHeight;
-            const scrollRatio = maxScroll > 0 ? scrollInfo.top / maxScroll : 0;
             
-            const previewMaxScroll = previewEl.scrollHeight - previewEl.clientHeight;
-            const previewScrollTop = previewMaxScroll > 0 ? scrollRatio * previewMaxScroll : 0;
+            // --- FIX START: Kiểm tra sát đáy Editor ---
+            // Nếu vị trí cuộn + chiều cao view >= tổng chiều cao (trừ đi 50px dung sai)
+            if (scrollInfo.top + scrollInfo.clientHeight >= scrollInfo.height - 50) {
+                previewEl.scrollTop = previewEl.scrollHeight; // Ép Preview xuống đáy
+                setTimeout(() => { isScrollingEditor = false; }, 50);
+                return;
+            }
+            // --- FIX END ---
+            
+            const lineHeight = codeEditor.defaultTextHeight();
+            
+            // Get the line number at the top of the visible area
+            const topLine = Math.floor(scrollInfo.top / lineHeight);
+            
+            // Get corresponding pixel position in preview
+            const previewScrollTop = getPreviewScrollForEditorLine(topLine);
             
             previewEl.scrollTop = previewScrollTop;
             
@@ -1457,17 +1697,31 @@ function initCodeEditor() {
             }, 50);
         });
         
-        // Sync scroll from preview to editor
+        // Sync scroll from preview to editor (pixel-based)
         previewEl.addEventListener('scroll', function() {
             if (isScrollingEditor) return;
+            if (isTyping) return; // <--- FIX: Đang gõ thì không sync
+            
             isScrollingPreview = true;
             
-            const previewMaxScroll = previewEl.scrollHeight - previewEl.clientHeight;
-            const scrollRatio = previewMaxScroll > 0 ? previewEl.scrollTop / previewMaxScroll : 0;
+            // --- FIX START: Kiểm tra sát đáy Preview ---
+            // Nếu vị trí cuộn + chiều cao view >= tổng chiều cao (trừ đi 50px dung sai)
+            if (previewEl.scrollTop + previewEl.clientHeight >= previewEl.scrollHeight - 50) {
+                const scrollInfo = codeEditor.getScrollInfo();
+                codeEditor.scrollTo(null, scrollInfo.height); // Ép Editor xuống đáy
+                setTimeout(() => { isScrollingPreview = false; }, 50);
+                return;
+            }
+            // --- FIX END ---
             
-            const scrollInfo = codeEditor.getScrollInfo();
-            const maxScroll = scrollInfo.height - scrollInfo.clientHeight;
-            const editorScrollTop = maxScroll > 0 ? scrollRatio * maxScroll : 0;
+            const previewScrollTop = previewEl.scrollTop;
+            
+            // Get corresponding line in editor
+            const editorLine = getEditorLineForPreviewScroll(previewScrollTop);
+            
+            // Convert line to scroll position
+            const lineHeight = codeEditor.defaultTextHeight();
+            const editorScrollTop = editorLine * lineHeight;
             
             codeEditor.scrollTo(null, editorScrollTop);
             
@@ -1475,6 +1729,21 @@ function initCodeEditor() {
                 isScrollingPreview = false;
             }, 50);
         });
+        
+        // Rebuild cache when content changes (debounced to avoid lag)
+        let cacheRebuildTimeout = null;
+        codeEditor.on('change', function() {
+            clearTimeout(cacheRebuildTimeout);
+            cacheRebuildTimeout = setTimeout(() => {
+                elementPositionsCache = null; // Chỉ xóa cache khi người dùng ĐÃ DỪNG gõ
+            }, 500); // Tăng timeout để tránh rebuild quá nhiều khi đang gõ
+        });
+        
+        // Also rebuild when preview content changes
+        const previewObserver = new MutationObserver(() => {
+            elementPositionsCache = null; // Invalidate cache
+        });
+        previewObserver.observe(previewEl, { childList: true, subtree: true });
         
         // Auto-show hint when typing :::
         codeEditor.on('inputRead', function(cm, change) {

@@ -24,8 +24,11 @@ const isPkg = typeof process.pkg !== 'undefined';
 let baseDir = isPkg ? path.dirname(process.execPath) : __dirname;
 
 // If .exe is in public folder, use parent directory as baseDir (root directory)
-if (isPkg && baseDir.endsWith('public')) {
-  baseDir = path.dirname(baseDir);
+// Normalize paths for cross-platform compatibility
+const normalizedBaseDir = path.normalize(baseDir);
+const baseDirName = path.basename(normalizedBaseDir).toLowerCase();
+if (isPkg && baseDirName === 'public') {
+  baseDir = path.dirname(normalizedBaseDir);
 }
 
 const BIN_FOLDER = path.join(baseDir, 'bin');
@@ -44,6 +47,13 @@ if (isPkg && !fs.existsSync(PUBLIC_FOLDER)) {
       copyDirSync(bundledPublic, PUBLIC_FOLDER);
     }
   }
+}
+
+// Helper function to check if a path is within a base directory (cross-platform safe)
+function isPathWithinBase(filePath, basePath) {
+  const normalizedFilePath = path.resolve(filePath).toLowerCase();
+  const normalizedBasePath = path.resolve(basePath).toLowerCase();
+  return normalizedFilePath.startsWith(normalizedBasePath);
 }
 
 // Helper function to copy directory
@@ -70,31 +80,56 @@ app.use(express.static(PUBLIC_FOLDER));
 // Ensure bin folder exists
 if (!fs.existsSync(BIN_FOLDER)) {
   fs.mkdirSync(BIN_FOLDER, { recursive: true });
+  console.log(`📁 Created bin folder at: ${BIN_FOLDER}`);
 }
+
+// Log paths for debugging
+console.log('📂 Paths configuration:');
+console.log(`   Base directory: ${baseDir}`);
+console.log(`   Bin folder: ${BIN_FOLDER}`);
+console.log(`   Public folder: ${PUBLIC_FOLDER}`);
+console.log(`   Bin folder exists: ${fs.existsSync(BIN_FOLDER)}`);
 
 // Helper function to recursively scan directory and return file tree
 function scanDirectory(dir, basePath = '') {
   const items = [];
-  const entries = fs.readdirSync(dir, { withFileTypes: true });
+  
+  // Check if directory exists
+  if (!fs.existsSync(dir)) {
+    console.warn(`⚠️  Directory does not exist: ${dir}`);
+    return items;
+  }
+  
+  try {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
 
-  for (const entry of entries) {
-    const fullPath = path.join(dir, entry.name);
-    const relativePath = path.join(basePath, entry.name).replace(/\\/g, '/');
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      const relativePath = path.join(basePath, entry.name).replace(/\\/g, '/');
 
-    if (entry.isDirectory()) {
-      items.push({
-        name: entry.name,
-        path: relativePath,
-        type: 'folder',
-        children: scanDirectory(fullPath, relativePath)
-      });
-    } else if (entry.isFile() && entry.name.endsWith('.md')) {
-      items.push({
-        name: entry.name,
-        path: relativePath,
-        type: 'file'
-      });
+      try {
+        if (entry.isDirectory()) {
+          items.push({
+            name: entry.name,
+            path: relativePath,
+            type: 'folder',
+            children: scanDirectory(fullPath, relativePath)
+          });
+        } else if (entry.isFile() && entry.name.endsWith('.md')) {
+          items.push({
+            name: entry.name,
+            path: relativePath,
+            type: 'file'
+          });
+        }
+      } catch (err) {
+        console.warn(`⚠️  Error processing entry ${fullPath}:`, err.message);
+        // Continue with other entries
+      }
     }
+  } catch (error) {
+    console.error(`❌ Error scanning directory ${dir}:`, error.message);
+    throw error;
   }
 
   return items.sort((a, b) => {
@@ -143,8 +178,8 @@ app.get('/api/file', (req, res) => {
 
     const fullPath = path.join(BIN_FOLDER, normalizedPath);
     
-    // Ensure the file is within the bin folder
-    if (!fullPath.startsWith(BIN_FOLDER)) {
+    // Ensure the file is within the bin folder (cross-platform safe check)
+    if (!isPathWithinBase(fullPath, BIN_FOLDER)) {
       return res.status(400).json({ error: 'Invalid path' });
     }
 
@@ -177,8 +212,8 @@ app.post('/api/folder', (req, res) => {
 
     const fullPath = path.join(BIN_FOLDER, normalizedPath);
     
-    // Ensure the folder is within the bin folder
-    if (!fullPath.startsWith(BIN_FOLDER)) {
+    // Ensure the folder is within the bin folder (cross-platform safe check)
+    if (!isPathWithinBase(fullPath, BIN_FOLDER)) {
       return res.status(400).json({ error: 'Invalid path' });
     }
 
@@ -216,8 +251,8 @@ app.post('/api/move', (req, res) => {
     const fullFromPath = path.join(BIN_FOLDER, normalizedFrom);
     const fullToPath = path.join(BIN_FOLDER, normalizedTo);
     
-    // Ensure paths are within the bin folder
-    if (!fullFromPath.startsWith(BIN_FOLDER) || !fullToPath.startsWith(BIN_FOLDER)) {
+    // Ensure paths are within the bin folder (cross-platform safe check)
+    if (!isPathWithinBase(fullFromPath, BIN_FOLDER) || !isPathWithinBase(fullToPath, BIN_FOLDER)) {
       return res.status(400).json({ error: 'Invalid path' });
     }
 
@@ -328,8 +363,8 @@ app.get('/api/image/*', (req, res) => {
     
     const fullPath = path.join(BIN_FOLDER, normalizedPath);
     
-    // Ensure the file is within the bin folder
-    if (!fullPath.startsWith(BIN_FOLDER)) {
+    // Ensure the file is within the bin folder (cross-platform safe check)
+    if (!isPathWithinBase(fullPath, BIN_FOLDER)) {
       return res.status(400).json({ error: 'Invalid path' });
     }
     
@@ -374,8 +409,8 @@ app.delete('/api/delete', (req, res) => {
 
     const fullPath = path.join(BIN_FOLDER, normalizedPath);
     
-    // Ensure the file is within the bin folder
-    if (!fullPath.startsWith(BIN_FOLDER)) {
+    // Ensure the file is within the bin folder (cross-platform safe check)
+    if (!isPathWithinBase(fullPath, BIN_FOLDER)) {
       return res.status(400).json({ error: 'Invalid path' });
     }
 
@@ -424,8 +459,8 @@ app.post('/api/copy', (req, res) => {
     const fullFromPath = path.join(BIN_FOLDER, normalizedFrom);
     const fullToPath = path.join(BIN_FOLDER, normalizedTo);
     
-    // Ensure paths are within the bin folder
-    if (!fullFromPath.startsWith(BIN_FOLDER) || !fullToPath.startsWith(BIN_FOLDER)) {
+    // Ensure paths are within the bin folder (cross-platform safe check)
+    if (!isPathWithinBase(fullFromPath, BIN_FOLDER) || !isPathWithinBase(fullToPath, BIN_FOLDER)) {
       return res.status(400).json({ error: 'Invalid path' });
     }
 
@@ -498,8 +533,8 @@ app.post('/api/rename', (req, res) => {
 
     const fullPath = path.join(BIN_FOLDER, normalizedPath);
     
-    // Ensure the file is within the bin folder
-    if (!fullPath.startsWith(BIN_FOLDER)) {
+    // Ensure the file is within the bin folder (cross-platform safe check)
+    if (!isPathWithinBase(fullPath, BIN_FOLDER)) {
       return res.status(400).json({ error: 'Invalid path' });
     }
 
@@ -558,8 +593,8 @@ app.post('/api/save', (req, res) => {
 
     const fullPath = path.join(BIN_FOLDER, normalizedPath);
     
-    // Ensure the file is within the bin folder
-    if (!fullPath.startsWith(BIN_FOLDER)) {
+    // Ensure the file is within the bin folder (cross-platform safe check)
+    if (!isPathWithinBase(fullPath, BIN_FOLDER)) {
       return res.status(400).json({ error: 'Invalid path' });
     }
 
