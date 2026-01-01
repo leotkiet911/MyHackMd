@@ -12,8 +12,8 @@ let lastBroadcastedContent = ''; // Track last content sent to server
 let socketChangeTimeout = null; // Debounce for socket changes
 let isTyping = false; // Flag to check if user is typing (prevents scroll sync jank)
 let typingTimeout = null; // Timeout to reset typing flag
-let elementPositionsCache = null; // Cache for preview element positions (for scroll sync)
-let cacheTimestamp = 0; // Timestamp for cache validation
+let lineToPixelMapping = null; // Cache for line to pixel mapping
+let mappingCacheTimestamp = 0; // Timestamp for cache validation
 
 // Markdown-it container plugin (for ::: info, ::: success, etc.)
 function markdownItContainer(md, name) {
@@ -708,28 +708,23 @@ function updatePreview(content) {
         }
         // --- FIX END ---
         
-        // --- FIX: Xử lý ảnh để fix cache vị trí và tránh Layout Shift ---
+        // --- FIX: Xử lý ảnh để tránh Layout Shift ---
         const images = previewEl.querySelectorAll('img');
         images.forEach(img => {
-            // Khi ảnh load xong, invalidate cache để tính toán lại vị trí chính xác
+            // Khi ảnh load xong, nếu đang chế độ ghim đáy thì ghim tiếp
+            // Vì ảnh load xong làm trang dài ra (scrollHeight tăng), cần cuộn tiếp xuống
             img.addEventListener('load', () => {
-                if (!isTyping) {
-                    elementPositionsCache = null; 
-                }
+                // Invalidate mapping cache because image height changed
+                lineToPixelMapping = null;
                 
-                // --- FIX BỔ SUNG: Khi ảnh load xong, nếu đang chế độ ghim đáy thì ghim tiếp ---
-                // Vì ảnh load xong làm trang dài ra, cần cuộn tiếp xuống
                 if (wasAtBottom) {
                     previewEl.scrollTop = previewEl.scrollHeight;
                 }
             });
             
-            // Xử lý lỗi load ảnh
+            // Invalidate cache on error too
             img.addEventListener('error', () => {
-                // Nếu ảnh lỗi, vẫn invalidate cache để tránh tính toán sai
-                if (!isTyping) {
-                    elementPositionsCache = null;
-                }
+                lineToPixelMapping = null;
             });
         });
         // --- FIX END ---
@@ -1482,46 +1477,95 @@ function initCodeEditor() {
             }
         });
         
-        // Sync scroll between editor and preview (pixel-based, accounting for images)
+        // Sync scroll between editor and preview (pixel-based algorithm with image handling)
         let isScrollingEditor = false;
         let isScrollingPreview = false;
         
         const previewEl = document.getElementById('preview');
         
-        // Cache for element positions is now global (declared at top of file)
-        
-        // Function to rebuild element positions cache
-        function rebuildElementPositionsCache() {
-            const elements = previewEl.querySelectorAll('p, h1, h2, h3, h4, h5, h6, img, pre, blockquote, ul, ol, table, .markdown-container, .katex-display');
-            elementPositionsCache = [];
-            
-            elements.forEach((element, index) => {
-                const rect = element.getBoundingClientRect();
-                const previewRect = previewEl.getBoundingClientRect();
-                const offsetTop = element.offsetTop || (rect.top - previewRect.top + previewEl.scrollTop);
-                const height = element.offsetHeight || rect.height;
-                
-                elementPositionsCache.push({
-                    element: element,
-                    offsetTop: offsetTop,
-                    height: height,
-                    offsetBottom: offsetTop + height,
-                    isImage: element.tagName === 'IMG'
-                });
-            });
-            
-            cacheTimestamp = Date.now();
-        }
-        
-        // Function to get preview scroll position for editor line (pixel-based)
-        function getPreviewScrollForEditorLine(lineNumber) {
-            // Rebuild cache if needed (every 500ms or if empty)
-            if (!elementPositionsCache || Date.now() - cacheTimestamp > 500) {
-                rebuildElementPositionsCache();
+        // Build mapping between editor lines and preview pixel positions
+        // This handles images correctly by using their actual pixel heights
+        function buildLineToPixelMapping() {
+            // Return cached mapping if still valid (within 300ms)
+            if (lineToPixelMapping && Date.now() - mappingCacheTimestamp < 300) {
+                return lineToPixelMapping;
             }
             
-            if (!elementPositionsCache || elementPositionsCache.length === 0) {
-                // Fallback to ratio-based
+            const mapping = [];
+            const editorContent = codeEditor.getValue();
+            const lines = editorContent.split('\n');
+            
+            // Get all block elements in preview (including images)
+            const elements = previewEl.querySelectorAll('p, h1, h2, h3, h4, h5, h6, img, pre, blockquote, ul, ol, table, .markdown-container, .katex-display');
+            
+            if (elements.length === 0) {
+                lineToPixelMapping = mapping;
+                mappingCacheTimestamp = Date.now();
+                return mapping;
+            }
+            
+            // Build mapping: for each element, find corresponding line range in editor
+            let currentLine = 0;
+            
+            elements.forEach((element, index) => {
+                const offsetTop = element.offsetTop;
+                // For images, use actual pixel height (offsetHeight or naturalHeight)
+                const offsetHeight = element.tagName === 'IMG' 
+                    ? (element.offsetHeight || element.naturalHeight || 0)
+                    : (element.offsetHeight || 0);
+                const offsetBottom = offsetTop + offsetHeight;
+                
+                // For images, they usually take 1 line in markdown
+                if (element.tagName === 'IMG') {
+                    // Find the line containing image markdown
+                    let imageLine = -1;
+                    for (let i = currentLine; i < lines.length; i++) {
+                        if (lines[i].match(/!\[.*\]\(.*\)/)) {
+                            imageLine = i;
+                            break;
+                        }
+                    }
+                    
+                    if (imageLine >= 0) {
+                        mapping.push({
+                            lineStart: imageLine,
+                            lineEnd: imageLine,
+                            pixelStart: offsetTop,
+                            pixelEnd: offsetBottom,
+                            isImage: true,
+                            pixelHeight: offsetHeight
+                        });
+                        currentLine = imageLine + 1;
+                    }
+                } else {
+                    // For text elements, estimate line count based on content
+                    const elementText = element.textContent || '';
+                    const estimatedLines = Math.max(1, Math.ceil(elementText.length / 80));
+                    
+                    mapping.push({
+                        lineStart: currentLine,
+                        lineEnd: currentLine + estimatedLines - 1,
+                        pixelStart: offsetTop,
+                        pixelEnd: offsetBottom,
+                        isImage: false
+                    });
+                    currentLine += estimatedLines;
+                }
+            });
+            
+            // Cache the mapping
+            lineToPixelMapping = mapping;
+            mappingCacheTimestamp = Date.now();
+            
+            return mapping;
+        }
+        
+        // Get preview pixel position for editor line (accounting for image pixel heights)
+        function getPreviewPixelForLine(editorLine) {
+            const mapping = buildLineToPixelMapping(); // Uses cache internally
+            
+            if (mapping.length === 0) {
+                // Fallback to simple ratio
                 const scrollInfo = codeEditor.getScrollInfo();
                 const maxScroll = scrollInfo.height - scrollInfo.clientHeight;
                 const scrollRatio = maxScroll > 0 ? scrollInfo.top / maxScroll : 0;
@@ -1529,166 +1573,107 @@ function initCodeEditor() {
                 return previewMaxScroll > 0 ? scrollRatio * previewMaxScroll : 0;
             }
             
-            // Get editor content to match with preview elements
-            const editorContent = codeEditor.getValue();
-            const lines = editorContent.split('\n');
-            
-            if (lineNumber < 0 || lineNumber >= lines.length) {
-                lineNumber = Math.max(0, Math.min(lines.length - 1, lineNumber));
+            // Find mapping entry that contains this line
+            for (const map of mapping) {
+                if (editorLine >= map.lineStart && editorLine <= map.lineEnd) {
+                    // Interpolate within the range
+                    if (map.lineStart === map.lineEnd) {
+                        return map.pixelStart;
+                    }
+                    const lineRatio = (editorLine - map.lineStart) / (map.lineEnd - map.lineStart);
+                    return map.pixelStart + lineRatio * (map.pixelEnd - map.pixelStart);
+                }
             }
             
-            const lineText = lines[lineNumber] || '';
-            
-            // Try to find matching element in preview
-            let bestMatch = null;
-            let bestScore = 0;
-            
-            elementPositionsCache.forEach((cacheItem, index) => {
-                const element = cacheItem.element;
-                const elementText = element.textContent || '';
-                let score = 0;
-                
-                // For images, check if line contains image markdown
-                if (cacheItem.isImage) {
-                    if (lineText.match(/!\[.*\]\(.*\)/)) {
-                        score = 100; // High score for image match
-                    }
-                } else {
-                    // For text elements, check if line text appears in element
-                    if (lineText.trim().length > 0) {
-                        const trimmedLine = lineText.trim();
-                        if (elementText.includes(trimmedLine)) {
-                            score = 50;
-                        } else if (elementText.includes(trimmedLine.substring(0, Math.min(20, trimmedLine.length)))) {
-                            score = 25;
-                        }
-                    }
+            // If line is beyond mapping, use last entry or estimate
+            if (mapping.length > 0) {
+                const lastMap = mapping[mapping.length - 1];
+                if (editorLine > lastMap.lineEnd) {
+                    return lastMap.pixelEnd;
                 }
-                
-                // Bonus for elements near the estimated position
-                const estimatedLineRatio = lineNumber / Math.max(1, lines.length - 1);
-                const estimatedPixelPos = estimatedLineRatio * previewEl.scrollHeight;
-                const distance = Math.abs(cacheItem.offsetTop - estimatedPixelPos);
-                const distanceScore = Math.max(0, 30 - distance / 10);
-                score += distanceScore;
-                
-                if (score > bestScore) {
-                    bestScore = score;
-                    bestMatch = cacheItem;
-                }
-            });
-            
-            if (bestMatch) {
-                // Use the element's top position, adjusted for better alignment
-                return Math.max(0, bestMatch.offsetTop - 10);
             }
             
             // Fallback: estimate based on line ratio
-            const lineRatio = lineNumber / Math.max(1, lines.length - 1);
+            const editorContent = codeEditor.getValue();
+            const totalLines = editorContent.split('\n').length;
+            const lineRatio = totalLines > 0 ? editorLine / totalLines : 0;
             return lineRatio * (previewEl.scrollHeight - previewEl.clientHeight);
         }
         
-        // Function to get editor line for preview scroll position
-        function getEditorLineForPreviewScroll(scrollTop) {
-            // Rebuild cache if needed
-            if (!elementPositionsCache || Date.now() - cacheTimestamp > 500) {
-                rebuildElementPositionsCache();
-            }
+        // Get editor line for preview pixel position
+        function getEditorLineForPixel(pixelPos) {
+            const mapping = buildLineToPixelMapping(); // Uses cache internally
             
-            if (!elementPositionsCache || elementPositionsCache.length === 0) {
-                // Fallback to ratio-based
+            if (mapping.length === 0) {
+                // Fallback to simple ratio
                 const previewMaxScroll = previewEl.scrollHeight - previewEl.clientHeight;
-                const scrollRatio = previewMaxScroll > 0 ? scrollTop / previewMaxScroll : 0;
+                const scrollRatio = previewMaxScroll > 0 ? pixelPos / previewMaxScroll : 0;
                 const scrollInfo = codeEditor.getScrollInfo();
                 const maxScroll = scrollInfo.height - scrollInfo.clientHeight;
                 return maxScroll > 0 ? scrollRatio * maxScroll : 0;
             }
             
-            // Find element at scroll position
+            // Find element at this pixel position
+            for (const map of mapping) {
+                if (pixelPos >= map.pixelStart && pixelPos <= map.pixelEnd) {
+                    // Interpolate within the range
+                    if (map.lineStart === map.lineEnd) {
+                        return map.lineStart;
+                    }
+                    const pixelRatio = (pixelPos - map.pixelStart) / (map.pixelEnd - map.pixelStart);
+                    return map.lineStart + pixelRatio * (map.lineEnd - map.lineStart);
+                }
+            }
+            
+            // Find nearest element
             let bestMatch = null;
             let bestDistance = Infinity;
             
-            elementPositionsCache.forEach(cacheItem => {
-                const elementTop = cacheItem.offsetTop;
-                const elementBottom = cacheItem.offsetBottom;
-                
-                // Check if scroll position is within or near this element
-                if (scrollTop >= elementTop && scrollTop <= elementBottom) {
-                    const distance = Math.abs(scrollTop - elementTop);
-                    if (distance < bestDistance) {
-                        bestDistance = distance;
-                        bestMatch = cacheItem;
-                    }
-                } else if (scrollTop < elementTop && elementTop - scrollTop < bestDistance) {
-                    bestDistance = elementTop - scrollTop;
-                    bestMatch = cacheItem;
+            mapping.forEach(map => {
+                const distance = Math.min(
+                    Math.abs(pixelPos - map.pixelStart),
+                    Math.abs(pixelPos - map.pixelEnd)
+                );
+                if (distance < bestDistance) {
+                    bestDistance = distance;
+                    bestMatch = map;
                 }
             });
             
             if (bestMatch) {
-                // Try to find corresponding line in editor
-                const element = bestMatch.element;
-                const editorContent = codeEditor.getValue();
-                const lines = editorContent.split('\n');
-                
-                // For images, look for image markdown
-                if (bestMatch.isImage) {
-                    for (let i = 0; i < lines.length; i++) {
-                        if (lines[i].match(/!\[.*\]\(.*\)/)) {
-                            return i;
-                        }
-                    }
-                }
-                
-                // For text elements, try to match content
-                const elementText = element.textContent || '';
-                if (elementText.trim().length > 0) {
-                    const searchText = elementText.trim().substring(0, 50);
-                    for (let i = 0; i < lines.length; i++) {
-                        if (lines[i].includes(searchText) || searchText.includes(lines[i].trim())) {
-                            return i;
-                        }
-                    }
-                }
-                
-                // Estimate based on element position
-                const elementIndex = elementPositionsCache.indexOf(bestMatch);
-                const elementRatio = elementIndex / Math.max(1, elementPositionsCache.length - 1);
-                return Math.floor(elementRatio * (lines.length - 1));
+                return bestMatch.lineStart;
             }
             
-            // Fallback: use ratio
+            // Fallback: estimate based on pixel ratio
             const previewMaxScroll = previewEl.scrollHeight - previewEl.clientHeight;
-            const scrollRatio = previewMaxScroll > 0 ? scrollTop / previewMaxScroll : 0;
-            const lines = codeEditor.getValue().split('\n');
-            return Math.floor(scrollRatio * (lines.length - 1));
+            const pixelRatio = previewMaxScroll > 0 ? pixelPos / previewMaxScroll : 0;
+            const editorContent = codeEditor.getValue();
+            const totalLines = editorContent.split('\n').length;
+            return Math.floor(pixelRatio * totalLines);
         }
         
-        // Sync scroll from editor to preview (pixel-based)
+        // Sync scroll from editor to preview (pixel-based with image handling)
         codeEditor.on('scroll', function() {
             if (isScrollingPreview) return;
-            if (isTyping) return; // <--- FIX: Đang gõ thì không sync
+            if (isTyping) return; // Đang gõ thì không sync
             
             isScrollingEditor = true;
             
             const scrollInfo = codeEditor.getScrollInfo();
             
-            // --- FIX START: Kiểm tra sát đáy Editor ---
-            // Nếu vị trí cuộn + chiều cao view >= tổng chiều cao (trừ đi 50px dung sai)
+            // Kiểm tra sát đáy Editor - ép Preview xuống đáy
             if (scrollInfo.top + scrollInfo.clientHeight >= scrollInfo.height - 50) {
-                previewEl.scrollTop = previewEl.scrollHeight; // Ép Preview xuống đáy
+                previewEl.scrollTop = previewEl.scrollHeight;
                 setTimeout(() => { isScrollingEditor = false; }, 50);
                 return;
             }
-            // --- FIX END ---
             
+            // Get the line number at the top of visible area
             const lineHeight = codeEditor.defaultTextHeight();
-            
-            // Get the line number at the top of the visible area
             const topLine = Math.floor(scrollInfo.top / lineHeight);
             
-            // Get corresponding pixel position in preview
-            const previewScrollTop = getPreviewScrollForEditorLine(topLine);
+            // Get corresponding pixel position in preview (accounts for image pixel heights)
+            const previewScrollTop = getPreviewPixelForLine(topLine);
             
             previewEl.scrollTop = previewScrollTop;
             
@@ -1697,27 +1682,23 @@ function initCodeEditor() {
             }, 50);
         });
         
-        // Sync scroll from preview to editor (pixel-based)
+        // Sync scroll from preview to editor (pixel-based with image handling)
         previewEl.addEventListener('scroll', function() {
             if (isScrollingEditor) return;
-            if (isTyping) return; // <--- FIX: Đang gõ thì không sync
+            if (isTyping) return; // Đang gõ thì không sync
             
             isScrollingPreview = true;
             
-            // --- FIX START: Kiểm tra sát đáy Preview ---
-            // Nếu vị trí cuộn + chiều cao view >= tổng chiều cao (trừ đi 50px dung sai)
+            // Kiểm tra sát đáy Preview - ép Editor xuống đáy
             if (previewEl.scrollTop + previewEl.clientHeight >= previewEl.scrollHeight - 50) {
                 const scrollInfo = codeEditor.getScrollInfo();
-                codeEditor.scrollTo(null, scrollInfo.height); // Ép Editor xuống đáy
+                codeEditor.scrollTo(null, scrollInfo.height);
                 setTimeout(() => { isScrollingPreview = false; }, 50);
                 return;
             }
-            // --- FIX END ---
             
-            const previewScrollTop = previewEl.scrollTop;
-            
-            // Get corresponding line in editor
-            const editorLine = getEditorLineForPreviewScroll(previewScrollTop);
+            // Get corresponding line in editor based on pixel position
+            const editorLine = getEditorLineForPixel(previewEl.scrollTop);
             
             // Convert line to scroll position
             const lineHeight = codeEditor.defaultTextHeight();
@@ -1729,21 +1710,6 @@ function initCodeEditor() {
                 isScrollingPreview = false;
             }, 50);
         });
-        
-        // Rebuild cache when content changes (debounced to avoid lag)
-        let cacheRebuildTimeout = null;
-        codeEditor.on('change', function() {
-            clearTimeout(cacheRebuildTimeout);
-            cacheRebuildTimeout = setTimeout(() => {
-                elementPositionsCache = null; // Chỉ xóa cache khi người dùng ĐÃ DỪNG gõ
-            }, 500); // Tăng timeout để tránh rebuild quá nhiều khi đang gõ
-        });
-        
-        // Also rebuild when preview content changes
-        const previewObserver = new MutationObserver(() => {
-            elementPositionsCache = null; // Invalidate cache
-        });
-        previewObserver.observe(previewEl, { childList: true, subtree: true });
         
         // Auto-show hint when typing :::
         codeEditor.on('inputRead', function(cm, change) {
