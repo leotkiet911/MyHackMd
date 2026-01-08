@@ -251,6 +251,25 @@ body {
     border-right: 1px solid #3e3e42;
     overflow: hidden;
     transition: flex 0.3s ease;
+    min-width: 200px;
+}
+
+.panel-splitter {
+    width: 4px;
+    background-color: #3e3e42;
+    cursor: col-resize;
+    flex-shrink: 0;
+    position: relative;
+    z-index: 10;
+    transition: background-color 0.2s;
+}
+
+.panel-splitter:hover {
+    background-color: #0e639c;
+}
+
+.editor-container.view-mode .panel-splitter {
+    display: none;
 }
 
 .editor-container.view-mode .editor-panel {
@@ -429,7 +448,6 @@ body {
 .preview-content {
     flex: 1;
     padding: 20px;
-    padding-bottom: 300px; /* Thêm padding dưới cùng để khớp với khoảng trống trong Editor */
     overflow-y: auto;
     color: #333333;
     line-height: 1.6;

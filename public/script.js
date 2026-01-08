@@ -10,10 +10,13 @@ let socket = null; // Socket.IO connection
 let isUpdatingFromSocket = false; // Flag to prevent circular updates
 let lastBroadcastedContent = ''; // Track last content sent to server
 let socketChangeTimeout = null; // Debounce for socket changes
-let isTyping = false; // Flag to check if user is typing (prevents scroll sync jank)
-let typingTimeout = null; // Timeout to reset typing flag
-let lineToPixelMapping = null; // Cache for line to pixel mapping
-let mappingCacheTimestamp = 0; // Timestamp for cache validation
+// Scroll sync state
+let isScrollingEditor = false;
+let isScrollingPreview = false;
+let scrollSyncEnabled = true;
+let isTyping = false;
+let typingTimeout = null;
+let wasAtBottom = false; // Track if user was at bottom before typing
 
 // Markdown-it container plugin (for ::: info, ::: success, etc.)
 function markdownItContainer(md, name) {
@@ -696,38 +699,20 @@ function updatePreview(content) {
         // Render markdown (texmath plugin will handle math automatically)
         let html = md.render(processedContent);
         
-        // --- FIX START: Logic Ghim đáy (Pin to Bottom) ---
-        // 1. Kiểm tra xem user có đang đứng sát đáy Preview không (sai số 50px)
-        const wasAtBottom = previewEl.scrollHeight - previewEl.scrollTop <= previewEl.clientHeight + 50;
+        // Check if user was at bottom before update
+        const scrollHeight = previewEl.scrollHeight;
+        const scrollTop = previewEl.scrollTop;
+        const clientHeight = previewEl.clientHeight;
+        const wasAtBottomBefore = scrollHeight - scrollTop <= clientHeight + 20;
         
         previewEl.innerHTML = html;
         
-        // 2. Nếu trước đó đang ở đáy, thì sau khi render ép lại xuống đáy ngay lập tức
-        if (wasAtBottom) {
-            previewEl.scrollTop = previewEl.scrollHeight;
+        // If was at bottom or user is typing at bottom, keep at bottom
+        if (wasAtBottomBefore || wasAtBottom) {
+            requestAnimationFrame(() => {
+                previewEl.scrollTop = previewEl.scrollHeight;
+            });
         }
-        // --- FIX END ---
-        
-        // --- FIX: Xử lý ảnh để tránh Layout Shift ---
-        const images = previewEl.querySelectorAll('img');
-        images.forEach(img => {
-            // Khi ảnh load xong, nếu đang chế độ ghim đáy thì ghim tiếp
-            // Vì ảnh load xong làm trang dài ra (scrollHeight tăng), cần cuộn tiếp xuống
-            img.addEventListener('load', () => {
-                // Invalidate mapping cache because image height changed
-                lineToPixelMapping = null;
-                
-                if (wasAtBottom) {
-                    previewEl.scrollTop = previewEl.scrollHeight;
-                }
-            });
-            
-            // Invalidate cache on error too
-            img.addEventListener('error', () => {
-                lineToPixelMapping = null;
-            });
-        });
-        // --- FIX END ---
     } else {
         previewEl.innerHTML = '<p style="color: #999;">Preview will appear here...</p>';
     }
@@ -1444,15 +1429,24 @@ function initCodeEditor() {
         codeEditor.on('change', () => {
             if (isUpdatingFromSocket) return; // Skip if updating from socket
             
-            // --- FIX: Đánh dấu đang gõ để chặn scroll sync ---
+            // Mark as typing and check if at bottom
             isTyping = true;
             if (typingTimeout) clearTimeout(typingTimeout);
             
-            // Sau 500ms không gõ gì nữa thì mới cho phép sync lại
+            // Check if cursor is at bottom
+            const cursor = codeEditor.getCursor();
+            const scrollInfo = codeEditor.getScrollInfo();
+            const lineCount = codeEditor.lineCount();
+            const isAtBottom = cursor.line >= lineCount - 5; // Within last 5 lines
+            const scrollAtBottom = scrollInfo.top + scrollInfo.clientHeight >= scrollInfo.height - 50;
+            
+            wasAtBottom = isAtBottom || scrollAtBottom;
+            
+            // Reset typing flag after 300ms of no typing
             typingTimeout = setTimeout(() => {
                 isTyping = false;
-            }, 500);
-            // --- FIX END ---
+                wasAtBottom = false;
+            }, 300);
             
             const content = codeEditor.getValue();
             updatePreview(content);
@@ -1477,239 +1471,67 @@ function initCodeEditor() {
             }
         });
         
-        // Sync scroll between editor and preview (pixel-based algorithm with image handling)
-        let isScrollingEditor = false;
-        let isScrollingPreview = false;
-        
+        // HackMD-style scroll sync - Simple and efficient
         const previewEl = document.getElementById('preview');
         
-        // Build mapping between editor lines and preview pixel positions
-        // This handles images correctly by using their actual pixel heights
-        function buildLineToPixelMapping() {
-            // Return cached mapping if still valid (within 300ms)
-            if (lineToPixelMapping && Date.now() - mappingCacheTimestamp < 300) {
-                return lineToPixelMapping;
-            }
-            
-            const mapping = [];
-            const editorContent = codeEditor.getValue();
-            const lines = editorContent.split('\n');
-            
-            // Get all block elements in preview (including images)
-            const elements = previewEl.querySelectorAll('p, h1, h2, h3, h4, h5, h6, img, pre, blockquote, ul, ol, table, .markdown-container, .katex-display');
-            
-            if (elements.length === 0) {
-                lineToPixelMapping = mapping;
-                mappingCacheTimestamp = Date.now();
-                return mapping;
-            }
-            
-            // Build mapping: for each element, find corresponding line range in editor
-            let currentLine = 0;
-            
-            elements.forEach((element, index) => {
-                const offsetTop = element.offsetTop;
-                // For images, use actual pixel height (offsetHeight or naturalHeight)
-                const offsetHeight = element.tagName === 'IMG' 
-                    ? (element.offsetHeight || element.naturalHeight || 0)
-                    : (element.offsetHeight || 0);
-                const offsetBottom = offsetTop + offsetHeight;
-                
-                // For images, they usually take 1 line in markdown
-                if (element.tagName === 'IMG') {
-                    // Find the line containing image markdown
-                    let imageLine = -1;
-                    for (let i = currentLine; i < lines.length; i++) {
-                        if (lines[i].match(/!\[.*\]\(.*\)/)) {
-                            imageLine = i;
-                            break;
-                        }
-                    }
-                    
-                    if (imageLine >= 0) {
-                        mapping.push({
-                            lineStart: imageLine,
-                            lineEnd: imageLine,
-                            pixelStart: offsetTop,
-                            pixelEnd: offsetBottom,
-                            isImage: true,
-                            pixelHeight: offsetHeight
-                        });
-                        currentLine = imageLine + 1;
-                    }
-                } else {
-                    // For text elements, estimate line count based on content
-                    const elementText = element.textContent || '';
-                    const estimatedLines = Math.max(1, Math.ceil(elementText.length / 80));
-                    
-                    mapping.push({
-                        lineStart: currentLine,
-                        lineEnd: currentLine + estimatedLines - 1,
-                        pixelStart: offsetTop,
-                        pixelEnd: offsetBottom,
-                        isImage: false
-                    });
-                    currentLine += estimatedLines;
-                }
-            });
-            
-            // Cache the mapping
-            lineToPixelMapping = mapping;
-            mappingCacheTimestamp = Date.now();
-            
-            return mapping;
-        }
-        
-        // Get preview pixel position for editor line (accounting for image pixel heights)
-        function getPreviewPixelForLine(editorLine) {
-            const mapping = buildLineToPixelMapping(); // Uses cache internally
-            
-            if (mapping.length === 0) {
-                // Fallback to simple ratio
-                const scrollInfo = codeEditor.getScrollInfo();
-                const maxScroll = scrollInfo.height - scrollInfo.clientHeight;
-                const scrollRatio = maxScroll > 0 ? scrollInfo.top / maxScroll : 0;
-                const previewMaxScroll = previewEl.scrollHeight - previewEl.clientHeight;
-                return previewMaxScroll > 0 ? scrollRatio * previewMaxScroll : 0;
-            }
-            
-            // Find mapping entry that contains this line
-            for (const map of mapping) {
-                if (editorLine >= map.lineStart && editorLine <= map.lineEnd) {
-                    // Interpolate within the range
-                    if (map.lineStart === map.lineEnd) {
-                        return map.pixelStart;
-                    }
-                    const lineRatio = (editorLine - map.lineStart) / (map.lineEnd - map.lineStart);
-                    return map.pixelStart + lineRatio * (map.pixelEnd - map.pixelStart);
-                }
-            }
-            
-            // If line is beyond mapping, use last entry or estimate
-            if (mapping.length > 0) {
-                const lastMap = mapping[mapping.length - 1];
-                if (editorLine > lastMap.lineEnd) {
-                    return lastMap.pixelEnd;
-                }
-            }
-            
-            // Fallback: estimate based on line ratio
-            const editorContent = codeEditor.getValue();
-            const totalLines = editorContent.split('\n').length;
-            const lineRatio = totalLines > 0 ? editorLine / totalLines : 0;
-            return lineRatio * (previewEl.scrollHeight - previewEl.clientHeight);
-        }
-        
-        // Get editor line for preview pixel position
-        function getEditorLineForPixel(pixelPos) {
-            const mapping = buildLineToPixelMapping(); // Uses cache internally
-            
-            if (mapping.length === 0) {
-                // Fallback to simple ratio
-                const previewMaxScroll = previewEl.scrollHeight - previewEl.clientHeight;
-                const scrollRatio = previewMaxScroll > 0 ? pixelPos / previewMaxScroll : 0;
-                const scrollInfo = codeEditor.getScrollInfo();
-                const maxScroll = scrollInfo.height - scrollInfo.clientHeight;
-                return maxScroll > 0 ? scrollRatio * maxScroll : 0;
-            }
-            
-            // Find element at this pixel position
-            for (const map of mapping) {
-                if (pixelPos >= map.pixelStart && pixelPos <= map.pixelEnd) {
-                    // Interpolate within the range
-                    if (map.lineStart === map.lineEnd) {
-                        return map.lineStart;
-                    }
-                    const pixelRatio = (pixelPos - map.pixelStart) / (map.pixelEnd - map.pixelStart);
-                    return map.lineStart + pixelRatio * (map.lineEnd - map.lineStart);
-                }
-            }
-            
-            // Find nearest element
-            let bestMatch = null;
-            let bestDistance = Infinity;
-            
-            mapping.forEach(map => {
-                const distance = Math.min(
-                    Math.abs(pixelPos - map.pixelStart),
-                    Math.abs(pixelPos - map.pixelEnd)
-                );
-                if (distance < bestDistance) {
-                    bestDistance = distance;
-                    bestMatch = map;
-                }
-            });
-            
-            if (bestMatch) {
-                return bestMatch.lineStart;
-            }
-            
-            // Fallback: estimate based on pixel ratio
-            const previewMaxScroll = previewEl.scrollHeight - previewEl.clientHeight;
-            const pixelRatio = previewMaxScroll > 0 ? pixelPos / previewMaxScroll : 0;
-            const editorContent = codeEditor.getValue();
-            const totalLines = editorContent.split('\n').length;
-            return Math.floor(pixelRatio * totalLines);
-        }
-        
-        // Sync scroll from editor to preview (pixel-based with image handling)
+        // Simple ratio-based scroll sync (like HackMD)
+        // Sync scroll from editor to preview
         codeEditor.on('scroll', function() {
-            if (isScrollingPreview) return;
-            if (isTyping) return; // Đang gõ thì không sync
+            // Don't sync if preview is scrolling, sync disabled, or user is typing
+            if (isScrollingPreview || !scrollSyncEnabled || isTyping) return;
             
             isScrollingEditor = true;
             
             const scrollInfo = codeEditor.getScrollInfo();
+            const editorMaxScroll = scrollInfo.height - scrollInfo.clientHeight;
             
-            // Kiểm tra sát đáy Editor - ép Preview xuống đáy
-            if (scrollInfo.top + scrollInfo.clientHeight >= scrollInfo.height - 50) {
+            // Handle bottom scroll
+            if (editorMaxScroll > 0 && scrollInfo.top >= editorMaxScroll - 5) {
                 previewEl.scrollTop = previewEl.scrollHeight;
-                setTimeout(() => { isScrollingEditor = false; }, 50);
-                return;
+            } else if (editorMaxScroll > 0) {
+                // Calculate scroll ratio
+                const scrollRatio = scrollInfo.top / editorMaxScroll;
+                const previewMaxScroll = previewEl.scrollHeight - previewEl.clientHeight;
+                if (previewMaxScroll > 0) {
+                    previewEl.scrollTop = scrollRatio * previewMaxScroll;
+                }
             }
-            
-            // Get the line number at the top of visible area
-            const lineHeight = codeEditor.defaultTextHeight();
-            const topLine = Math.floor(scrollInfo.top / lineHeight);
-            
-            // Get corresponding pixel position in preview (accounts for image pixel heights)
-            const previewScrollTop = getPreviewPixelForLine(topLine);
-            
-            previewEl.scrollTop = previewScrollTop;
             
             setTimeout(() => {
                 isScrollingEditor = false;
-            }, 50);
+            }, 10);
         });
         
-        // Sync scroll from preview to editor (pixel-based with image handling)
+        // Sync scroll from preview to editor
         previewEl.addEventListener('scroll', function() {
-            if (isScrollingEditor) return;
-            if (isTyping) return; // Đang gõ thì không sync
+            if (isScrollingEditor || !scrollSyncEnabled) return;
             
             isScrollingPreview = true;
             
-            // Kiểm tra sát đáy Preview - ép Editor xuống đáy
-            if (previewEl.scrollTop + previewEl.clientHeight >= previewEl.scrollHeight - 50) {
+            const previewMaxScroll = previewEl.scrollHeight - previewEl.clientHeight;
+            const scrollTop = previewEl.scrollTop;
+            
+            // Handle bottom scroll
+            if (previewMaxScroll > 0 && scrollTop >= previewMaxScroll - 5) {
                 const scrollInfo = codeEditor.getScrollInfo();
                 codeEditor.scrollTo(null, scrollInfo.height);
-                setTimeout(() => { isScrollingPreview = false; }, 50);
-                return;
+            } else if (previewMaxScroll > 0) {
+                // Calculate scroll ratio
+                const scrollRatio = scrollTop / previewMaxScroll;
+                const scrollInfo = codeEditor.getScrollInfo();
+                const editorMaxScroll = scrollInfo.height - scrollInfo.clientHeight;
+                if (editorMaxScroll > 0) {
+                    codeEditor.scrollTo(null, scrollRatio * editorMaxScroll);
+                }
             }
-            
-            // Get corresponding line in editor based on pixel position
-            const editorLine = getEditorLineForPixel(previewEl.scrollTop);
-            
-            // Convert line to scroll position
-            const lineHeight = codeEditor.defaultTextHeight();
-            const editorScrollTop = editorLine * lineHeight;
-            
-            codeEditor.scrollTo(null, editorScrollTop);
             
             setTimeout(() => {
                 isScrollingPreview = false;
-            }, 50);
+            }, 10);
         });
+        
+        // Initialize resize splitter
+        initResizeSplitter();
         
         // Auto-show hint when typing :::
         codeEditor.on('inputRead', function(cm, change) {
@@ -1747,6 +1569,89 @@ function initCodeEditor() {
             }
         });
     }
+}
+
+// Initialize resize splitter between editor and preview panels
+function initResizeSplitter() {
+    const editorContainer = document.querySelector('.editor-container');
+    const editorPanel = document.querySelector('.editor-panel');
+    const previewPanel = document.querySelector('.preview-panel');
+    
+    if (!editorContainer || !editorPanel || !previewPanel) {
+        return;
+    }
+    
+    // Create splitter element
+    let splitter = document.getElementById('panel-splitter');
+    if (!splitter) {
+        splitter = document.createElement('div');
+        splitter.id = 'panel-splitter';
+        splitter.className = 'panel-splitter';
+        editorContainer.insertBefore(splitter, previewPanel);
+    }
+    
+    let isResizing = false;
+    let startX = 0;
+    let startEditorWidth = 0;
+    let startPreviewWidth = 0;
+    
+    splitter.addEventListener('mousedown', (e) => {
+        isResizing = true;
+        startX = e.clientX;
+        
+        const editorRect = editorPanel.getBoundingClientRect();
+        const previewRect = previewPanel.getBoundingClientRect();
+        startEditorWidth = editorRect.width;
+        startPreviewWidth = previewRect.width;
+        
+        document.body.style.cursor = 'col-resize';
+        document.body.style.userSelect = 'none';
+        
+        // Disable scroll sync while resizing
+        scrollSyncEnabled = false;
+        
+        e.preventDefault();
+    });
+    
+    document.addEventListener('mousemove', (e) => {
+        if (!isResizing) return;
+        
+        const deltaX = e.clientX - startX;
+        const containerWidth = editorContainer.getBoundingClientRect().width;
+        const minPanelWidth = 200; // Minimum width for each panel
+        
+        // Calculate new widths
+        let newEditorWidth = startEditorWidth + deltaX;
+        let newPreviewWidth = startPreviewWidth - deltaX;
+        
+        // Enforce minimum widths
+        if (newEditorWidth < minPanelWidth) {
+            newEditorWidth = minPanelWidth;
+            newPreviewWidth = containerWidth - minPanelWidth;
+        } else if (newPreviewWidth < minPanelWidth) {
+            newPreviewWidth = minPanelWidth;
+            newEditorWidth = containerWidth - minPanelWidth;
+        }
+        
+        // Apply new widths using flex-basis
+        editorPanel.style.flex = `0 0 ${newEditorWidth}px`;
+        previewPanel.style.flex = `1 1 ${newPreviewWidth}px`;
+        
+        e.preventDefault();
+    });
+    
+    document.addEventListener('mouseup', () => {
+        if (isResizing) {
+            isResizing = false;
+            document.body.style.cursor = '';
+            document.body.style.userSelect = '';
+            
+            // Re-enable scroll sync after resize
+            setTimeout(() => {
+                scrollSyncEnabled = true;
+            }, 100);
+        }
+    });
 }
 
 // Drag and Drop Handlers
